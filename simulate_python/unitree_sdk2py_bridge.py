@@ -426,3 +426,77 @@ class ElasticBand:
             self.length += 0.1
         if key == glfw.KEY_9:
             self.enable = not self.enable
+
+
+class Gripper:
+    """Approximates a closed hand using a MuJoCo weld equality constraint.
+
+    g1_29dof.xml's rubber hand is a rigid mesh with no articulated fingers, so
+    there is nothing to actually close around an object. Pressing G near the
+    target body welds it to the hand at their current relative pose (instead
+    of a pose baked into the XML), so grabbing works regardless of exactly how
+    the hand approached it. Pressing G again releases it.
+    """
+
+    def __init__(
+        self,
+        mj_model,
+        mj_data,
+        eq_name="right_hand_grip",
+        hand_body="right_wrist_yaw_link",
+        object_body="pick_box",
+        max_grab_distance=0.12,
+    ):
+        self.mj_model = mj_model
+        self.mj_data = mj_data
+        self.eq_id = mujoco.mj_name2id(mj_model, mujoco.mjtObj.mjOBJ_EQUALITY, eq_name)
+        if self.eq_id < 0:
+            raise ValueError(f"No equality constraint named '{eq_name}' in the model.")
+        self.hand_body_id = mj_model.body(hand_body).id
+        self.object_body_id = mj_model.body(object_body).id
+        self.max_grab_distance = max_grab_distance
+
+    @property
+    def holding(self):
+        return bool(self.mj_data.eq_active[self.eq_id])
+
+    def toggle(self):
+        if self.holding:
+            self._release()
+        else:
+            self._try_grab()
+
+    def _try_grab(self):
+        hand_pos = self.mj_data.xpos[self.hand_body_id]
+        object_pos = self.mj_data.xpos[self.object_body_id]
+        distance = np.linalg.norm(object_pos - hand_pos)
+        if distance > self.max_grab_distance:
+            print(f"Gripper: object is {distance:.3f}m away (max {self.max_grab_distance}m), nothing to grab.")
+            return
+
+        hand_quat = self.mj_data.xquat[self.hand_body_id]
+        object_quat = self.mj_data.xquat[self.object_body_id]
+
+        hand_mat = np.zeros(9)
+        mujoco.mju_quat2Mat(hand_mat, hand_quat)
+        hand_mat = hand_mat.reshape(3, 3)
+        relpos = hand_mat.T @ (object_pos - hand_pos)
+
+        hand_quat_conj = np.array([hand_quat[0], -hand_quat[1], -hand_quat[2], -hand_quat[3]])
+        relquat = np.zeros(4)
+        mujoco.mju_mulQuat(relquat, hand_quat_conj, object_quat)
+
+        self.mj_model.eq_data[self.eq_id, 0:3] = 0.0
+        self.mj_model.eq_data[self.eq_id, 3:6] = relpos
+        self.mj_model.eq_data[self.eq_id, 6:10] = relquat
+        self.mj_data.eq_active[self.eq_id] = 1
+        print("Gripper: grabbed object.")
+
+    def _release(self):
+        self.mj_data.eq_active[self.eq_id] = 0
+        print("Gripper: released object.")
+
+    def MujuocoKeyCallback(self, key):
+        glfw = mujoco.glfw.glfw
+        if key == glfw.KEY_G:
+            self.toggle()

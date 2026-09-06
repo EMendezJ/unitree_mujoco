@@ -5,7 +5,7 @@ from threading import Thread
 import threading
 
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize
-from unitree_sdk2py_bridge import UnitreeSdk2Bridge, ElasticBand
+from unitree_sdk2py_bridge import UnitreeSdk2Bridge, ElasticBand, Gripper
 
 import config
 
@@ -15,15 +15,33 @@ locker = threading.Lock()
 mj_model = mujoco.MjModel.from_xml_path(config.ROBOT_SCENE)
 mj_data = mujoco.MjData(mj_model)
 
+try:
+    gripper = Gripper(mj_model, mj_data)
+except ValueError:
+    # Scene has no "right_hand_grip" equality constraint (only
+    # scene_29dof_pick_and_place.xml defines one) -- nothing to grip.
+    gripper = None
 
+key_callbacks = []
 if config.ENABLE_ELASTIC_BAND:
     elastic_band = ElasticBand()
     if config.ROBOT == "h1" or config.ROBOT == "g1":
         band_attached_link = mj_model.body("torso_link").id
     else:
         band_attached_link = mj_model.body("base_link").id
+    key_callbacks.append(elastic_band.MujuocoKeyCallback)
+if gripper is not None:
+    key_callbacks.append(gripper.MujuocoKeyCallback)
+
+
+def _combined_key_callback(key):
+    for callback in key_callbacks:
+        callback(key)
+
+
+if key_callbacks:
     viewer = mujoco.viewer.launch_passive(
-        mj_model, mj_data, key_callback=elastic_band.MujuocoKeyCallback
+        mj_model, mj_data, key_callback=_combined_key_callback
     )
 else:
     viewer = mujoco.viewer.launch_passive(mj_model, mj_data)
